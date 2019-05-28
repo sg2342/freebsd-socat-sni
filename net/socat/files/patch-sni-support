@@ -1,0 +1,208 @@
+diff --git doc/socat.yo doc/socat.yo
+index a1acb60..8e62705 100644
+--- doc/socat.yo
++++ doc/socat.yo
+@@ -502,12 +502,14 @@ label(ADDRESS_OPENSSL_CONNECT)dit(bf(tt(OPENSSL:<host>:<port>)))
+    link(openssl-commonname)(OPTION_OPENSSL_COMMONNAME) option.
+    Socat tries to match it against the certificates subject commonName,
+    and the certifications extension subjectAltName DNS names. Wildcards in the
+-   certificate are supported.nl() 
++   certificate are supported. To specify the TLS SNI hostname to set use the
++   link(snihost)(OPTION_OPENSSL_SNIHOST) option.nl()
+    Option groups: link(FD)(GROUP_FD),link(SOCKET)(GROUP_SOCKET),link(IP4)(GROUP_IP4),link(IP6)(GROUP_IP6),link(TCP)(GROUP_TCP),link(OPENSSL)(GROUP_OPENSSL),link(RETRY)(GROUP_RETRY) nl()
+    Useful options:
+    link(cipher)(OPTION_OPENSSL_CIPHERLIST),
+    link(verify)(OPTION_OPENSSL_VERIFY),
+    link(commonname)(OPTION_OPENSSL_COMMONNAME),
++   link(snihost)(OPTION_OPENSSL_SNIHOST),
+    link(cafile)(OPTION_OPENSSL_CAFILE),
+    link(capath)(OPTION_OPENSSL_CAPATH),
+    link(certificate)(OPTION_OPENSSL_CERTIFICATE),
+@@ -2697,6 +2699,9 @@ label(OPTION_OPENSSL_COMMONNAME)dit(bf(tt(commonname=<string>)))
+    certificates commonname. This option has only meaning when option
+    link(verify)(OPTION_OPENSSL_VERIFY) is not disabled and the chosen cipher
+    provides a peer certificate.
++label(OPTION_OPENSSL_SNIHOST)dit(bf(tt(snihost=<string>)))
++   Specify the SNI hostname for the TLS request. The server can use this TLS
++   extension to choose which certificate to send.
+ label(OPTION_OPENSSL_FIPS)dit(bf(tt(fips)))
+    Enables FIPS mode if compiled in. For info about the FIPS encryption
+    implementation standard see lurl(http://oss-institute.org/fips-faq.html). 
+diff --git xio-openssl.c xio-openssl.c
+index 68b752f..61631ab 100644
+--- xio-openssl.c
++++ xio-openssl.c
+@@ -119,6 +119,7 @@ const struct optdesc opt_openssl_compress    = { "openssl-compress",   "compress
+ const struct optdesc opt_openssl_fips        = { "openssl-fips",       "fips",   OPT_OPENSSL_FIPS,        GROUP_OPENSSL, PH_SPEC, TYPE_BOOL,     OFUNC_SPEC };
+ #endif
+ const struct optdesc opt_openssl_commonname  = { "openssl-commonname", "cn",     OPT_OPENSSL_COMMONNAME,  GROUP_OPENSSL, PH_SPEC, TYPE_STRING,   OFUNC_SPEC };
++const struct optdesc opt_openssl_snihost     = { "openssl-snihost",   "snihost", OPT_OPENSSL_SNIHOST,     GROUP_OPENSSL, PH_SPEC, TYPE_STRING,   OFUNC_SPEC };
+ 
+ 
+ /* If FIPS is compiled in, we need to track if the user asked for FIPS mode.
+@@ -199,6 +200,7 @@ static int
+    bool opt_ver = true;	/* verify peer certificate */
+    char *opt_cert = NULL;	/* file name of client certificate */
+    const char *opt_commonname = NULL;	/* for checking peer certificate */
++   const char *opt_snihost = NULL;   /* for sni host */
+    int result;
+ 
+    if (!(xioflags & XIO_MAYCONVERT)) {
+@@ -228,10 +230,15 @@ static int
+ 
+    retropt_string(opts, OPT_OPENSSL_CERTIFICATE, &opt_cert);
+    retropt_string(opts, OPT_OPENSSL_COMMONNAME, (char **)&opt_commonname);
++   retropt_string(opts, OPT_OPENSSL_SNIHOST, (char **)&opt_snihost);
+    
+    if (opt_commonname == NULL) {
+       opt_commonname = hostname;
+    }
++   /* could do this, but might not be desired?
++   if (opt_snihost == NULL) {
++      opt_snihost = hostname;
++   } */
+ 
+    result =
+       _xioopen_openssl_prepare(opts, xfd, false, &opt_ver, opt_cert, &ctx);
+@@ -291,7 +298,7 @@ static int
+ 	 return result;
+       }
+ 
+-      result = _xioopen_openssl_connect(xfd, opt_ver, opt_commonname, ctx, level);
++      result = _xioopen_openssl_connect(xfd, opt_ver, opt_commonname, opt_snihost, ctx, level);
+       switch (result) {
+       case STAT_OK: break;
+ #if WITH_RETRY
+@@ -360,6 +367,7 @@ static int
+ int _xioopen_openssl_connect(struct single *xfd,
+ 			     bool opt_ver,
+ 			     const char *opt_commonname,
++			     const char *opt_snihost,
+ 			     SSL_CTX *ctx,
+ 			     int level) {
+    SSL *ssl;
+@@ -384,6 +392,12 @@ int _xioopen_openssl_connect(struct single *xfd,
+       return result;
+    }
+ 
++   if (opt_snihost && !SSL_set_tlsext_host_name(ssl, opt_snihost)) {
++      sycSSL_free(xfd->para.openssl.ssl);
++      xfd->para.openssl.ssl = NULL;
++      return STAT_NORETRY;
++   }
++
+    result = xioSSL_connect(xfd, opt_commonname, opt_ver, level);
+    if (result != STAT_OK) {
+       sycSSL_free(xfd->para.openssl.ssl);
+diff --git xio-openssl.h xio-openssl.h
+index ca47233..3265c2a 100644
+--- xio-openssl.h
++++ xio-openssl.h
+@@ -30,6 +30,7 @@ extern const struct optdesc opt_openssl_compress;
+ extern const struct optdesc opt_openssl_fips;
+ #endif
+ extern const struct optdesc opt_openssl_commonname;
++extern const struct optdesc opt_openssl_snihost;
+ 
+ extern int
+    _xioopen_openssl_prepare(struct opt *opts, struct single *xfd,
+@@ -38,6 +39,7 @@ extern int
+ extern int
+    _xioopen_openssl_connect(struct single *xfd,  bool opt_ver,
+ 			    const char *opt_commonname,
++			    const char *opt_snihost,
+ 			    SSL_CTX *ctx, int level);
+ extern int
+    _xioopen_openssl_listen(struct single *xfd, bool opt_ver,
+diff --git xioopts.c xioopts.c
+index 56b46c4..ddf2663 100644
+--- xioopts.c
++++ xioopts.c
+@@ -1115,6 +1115,7 @@ const struct optname optionnames[] = {
+ 	IF_OPENSSL("openssl-method",	&opt_openssl_method)
+ #endif
+ 	IF_OPENSSL("openssl-pseudo",	&opt_openssl_pseudo)
++	IF_OPENSSL("openssl-snihost",   &opt_openssl_snihost)
+ 	IF_OPENSSL("openssl-verify",	&opt_openssl_verify)
+ 	IF_TERMIOS("opost",	&opt_opost)
+ #if HAVE_TERMIOS_OSPEED
+@@ -1381,6 +1382,7 @@ const struct optname optionnames[] = {
+ #ifdef SO_SNDLOWAT
+ 	IF_SOCKET ("sndlowat",	&opt_so_sndlowat)
+ #endif
++	IF_OPENSSL("snihost",    &opt_openssl_snihost)
+ #ifdef SO_ACCEPTCONN /* AIX433 */
+ 	IF_SOCKET ("so-acceptconn",	&opt_so_acceptconn)
+ #endif /* SO_ACCEPTCONN */
+diff --git xioopts.h xioopts.h
+index 8b4ba74..cc94351 100644
+--- xioopts.h
++++ xioopts.h
+@@ -483,6 +483,7 @@ enum e_optcode {
+    OPT_OPENSSL_KEY,
+    OPT_OPENSSL_METHOD,
+    OPT_OPENSSL_PSEUDO,
++   OPT_OPENSSL_SNIHOST,
+    OPT_OPENSSL_VERIFY,
+    OPT_OPOST,		/* termios.c_oflag */
+    OPT_OSPEED,		/* termios.c_ospeed */
+--- doc/socat.1.orig	2019-05-28 11:37:02.676801000 +0000
++++ doc/socat.1	2019-05-28 11:38:11.307027000 +0000
+@@ -544,7 +544,8 @@
+ openssl\-commonname option\&.
+ Socat tries to match it against the certificates subject commonName,
+ and the certifications extension subjectAltName DNS names\&. Wildcards in the
+-certificate are supported\&.
++certificate are supported\&. To specify the TLS SNI hostname to set use the
++snihost option\&.
+ .br 
+ Option groups: FD,SOCKET,IP4,IP6,TCP,OPENSSL,RETRY 
+ .br 
+@@ -552,6 +553,7 @@
+ cipher,
+ verify,
+ commonname,
++snihost,
+ cafile,
+ capath,
+ certificate,
+@@ -2931,6 +2933,9 @@
+ certificates commonname\&. This option has only meaning when option
+ verify is not disabled and the chosen cipher
+ provides a peer certificate\&.
++.IP "\fB\f(CWsnihost=<string>\fP\fP"
++Specify the SNI hostname for the TLS request\&. The server can use this TLS
++extension to choose which certificate to send\&.
+ .IP "\fB\f(CWfips\fP\fP"
+ Enables FIPS mode if compiled in\&. For info about the FIPS encryption
+ implementation standard see http://oss\-institute\&.org/fips\-faq\&.html\&. 
+--- doc/socat.html.orig	2019-05-28 11:37:02.676801000 +0000
++++ doc/socat.html	2019-05-28 11:38:11.307027000 +0000
+@@ -520,12 +527,14 @@
+    <a href="socat.html#OPTION_OPENSSL_COMMONNAME">openssl-commonname</a> option.
+    Socat tries to match it against the certificates subject commonName,
+    and the certifications extension subjectAltName DNS names. Wildcards in the
+-   certificate are supported.<br> 
++   certificate are supported. To specify the TLS SNI hostname to set use the
++   <a href="socat.html#OPTION_OPENSSL_SNIHOST">snihost</a> option.<br>
+    Option groups: <a href="socat.html#GROUP_FD">FD</a>,<a href="socat.html#GROUP_SOCKET">SOCKET</a>,<a href="socat.html#GROUP_IP4">IP4</a>,<a href="socat.html#GROUP_IP6">IP6</a>,<a href="socat.html#GROUP_TCP">TCP</a>,<a href="socat.html#GROUP_OPENSSL">OPENSSL</a>,<a href="socat.html#GROUP_RETRY">RETRY</a> <br>
+    Useful options:
+    <a href="socat.html#OPTION_OPENSSL_CIPHERLIST">cipher</a>,
+    <a href="socat.html#OPTION_OPENSSL_VERIFY">verify</a>,
+    <a href="socat.html#OPTION_OPENSSL_COMMONNAME">commonname</a>,
++   <a href="socat.html#OPTION_OPENSSL_SNIHOST">snihost</a>,
+    <a href="socat.html#OPTION_OPENSSL_CAFILE">cafile</a>,
+    <a href="socat.html#OPTION_OPENSSL_CAPATH">capath</a>,
+    <a href="socat.html#OPTION_OPENSSL_CERTIFICATE">certificate</a>,
+@@ -2807,7 +2816,10 @@
+    certificates commonname. This option has only meaning when option
+    <a href="socat.html#OPTION_OPENSSL_VERIFY">verify</a> is not disabled and the chosen cipher
+    provides a peer certificate.
+-<a name="OPTION_OPENSSL_FIPS"></a><p><dt><strong><strong><code>fips</code></strong></strong><dd>
++<a name="OPTION_OPENSSL_SNIHOST"></a><dt><strong><strong><code>snihost=&lt;string&gt;</code></strong></strong><dd>
++   Specify the SNI hostname for the TLS request. The server can use this TLS
++   extension to choose which certificate to send.
++<a name="OPTION_OPENSSL_FIPS"></a><dt><strong><strong><code>fips</code></strong></strong><dd>
+    Enables FIPS mode if compiled in. For info about the FIPS encryption
+    implementation standard see <a href="http://oss-institute.org/fips-faq.html">http://oss-institute.org/fips-faq.html</a>. 
+    This mode might require that the involved certificates are generated with a
