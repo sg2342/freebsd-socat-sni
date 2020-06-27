@@ -2,11 +2,17 @@ env:
   CIRRUS_CLONE_DEPTH: 1
   ARCH: amd64
 
-task:
-  freebsd_instance:
-    matrix:
-      image: freebsd-12-1-release-amd64
-  install_script:
+freebsd_instance:
+  image_family: freebsd-12-1
+
+package_task:
+  timeout_in: 90m
+  pkg_upgrade_script:
+    - sed -i.bak -e 's,pkg+http://pkg.FreeBSD.org/\${ABI}/quarterly,pkg+http://pkg.FreeBSD.org/\${ABI}/latest,' /etc/pkg/FreeBSD.conf
+    - pkg upgrade -y
+  portsnap_script:
     - portsnap  --interactive fetch && portsnap extract
-  script:
-    - env BATCH=1 make -C net/socat
+  build_package_script:
+    - env BATCH=1 PACKAGES=`pwd` make -C net/socat package
+  binary_artifacts:
+    path: "./All/socat-1.7.3.3_1.txz"
